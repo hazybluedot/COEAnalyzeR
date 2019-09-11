@@ -1,0 +1,119 @@
+```{r setup}
+library(tidyverse)
+library(descr)
+
+library(vtir)
+library(COEanalysis)
+
+max_degree_term <- as_term(max(coe_vtir_degrees$term_degree))
+graduation_window <- graduation_window_fct(max_degree_term)
+
+university_data <- read_csv("~/ENGE/data/COE_profile.csv")
+```
+
+Relative percent of engineering degrees awarded of all degress awarded
+
+```{r engineering proportion}
+university_data %>%
+    spread(program, bachelor_degrees) %>%
+    summarize_at(vars(COE, UNV), sum) %>%
+    mutate(COE_pct = COE / UNV)
+```
+
+# Faculty Represnetation
+
+```{r faculty data}
+data_dir <- "~/ENGE/data/faculty_demographics/"
+files <- list.files(data_dir)
+
+do.call(rbind, lapply(files, function(file) {
+    parts <- str_match(file, "^([0-9]{4})_([A-Z]{2,3})_")
+    read_csv(file.path(data_dir, file)) %>% 
+        filter(grepl("^Virginia Polytechnic", School)) %>% 
+        select(4:14) %>%
+        mutate(year = as.integer(parts[1,2]), program = parts[1,3])
+})) %>%
+    gather(demographic, N, -c(year, program)) %>%
+    mutate(demographic = str_replace(demographic, "Nat ", "Nat") %>% 
+                                (function(s) { sapply(str_split(s, "\\s+"), function(ss) ss[1]) })) %>%
+    spread(demographic, N) %>%
+    gather(demographic, N, -c(year, program, Total))->
+    #spread(demographic, N) ->
+    faculty_data
+```
+
+```{r faculty-report}
+faculty_data %>%
+    mutate(pct = round(100 * N / Total, 1)) %>% mutate(rep = paste0(N, "(", pct, ")")) %>% select(-Total, -N, -pct) %>% unite(yp, year, program) %>% spread(yp, rep)
+```
+
+# COE Student Demographic Breakdown
+
+## URM and First-Generation
+
+```{r student-demographics coe}
+term_range_max <- as_term("Fall 2018")
+
+with(coe_undergrad_data %>%
+         filter(!is.na(first_generation), 
+                gender %in% c("Male", "Female"),
+                between(term_enter, as_term("Fall 2009"), term_range_max)),
+     CrossTable(urm, first_generation, prop.chisq = FALSE, format = "SPSS")) ->
+     urm_first_gen_cross
+urm_first_gen_cross
+```
+
+## URM and Gender
+
+```{r student-demographics coe urm-gender}
+with(coe_undergrad_data %>%
+         filter(!is.na(first_generation), 
+                gender %in% c("Male", "Female"),
+                between(term_enter, as_term("Fall 2009"), term_range_max)), 
+     CrossTable(urm, gender, prop.chisq = FALSE, format = "SPSS")) ->
+     urm_gender_cross
+urm_gender_cross
+```
+
+## First-Generation and Gender
+
+```{r student-demographics coe generation and gender}
+with(coe_undergrad_data %>%
+         filter(!is.na(first_generation), 
+                gender %in% c("Male", "Female"),
+                between(term_enter, as_term("Fall 2009"), term_range_max)),     CrossTable(first_generation, gender, prop.chisq = FALSE, format = "SPSS")) 
+```
+
+# CS Demographics
+
+## URM and First-Generation
+
+```{r student-demographics coe generation and gender}
+with(coe_undergrad_data %>%
+         filter(!is.na(first_generation), gender %in% c("Male", "Female"), 
+                matriculation_major == "CS",
+                between(term_enter, as_term("Fall 2009"), term_range_max)), 
+     CrossTable(urm, first_generation, prop.chisq = FALSE, format = "SPSS")) 
+```
+
+## URM and Gender
+
+```{r student-demographics coe generation and gender}
+with(coe_undergrad_data %>%
+         filter(!is.na(first_generation), gender %in% c("Male", "Female"), 
+                matriculation_major == "CS",
+                between(term_enter, as_term("Fall 2009"), term_range_max)), 
+     CrossTable(urm, gender, prop.chisq = FALSE, format = "SPSS")) 
+```
+
+
+## First-Generation and Gender
+
+```{r student-demographics coe generation and gender}
+with(coe_undergrad_data %>%
+         filter(!is.na(first_generation), gender %in% c("Male", "Female"), 
+                matriculation_major == "CS",
+                between(term_enter, as_term("Fall 2009"), term_range_max)), 
+     CrossTable(first_generation, gender, prop.chisq = FALSE, format = "SPSS")) 
+```
+

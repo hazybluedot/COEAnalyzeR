@@ -1,0 +1,653 @@
+---
+title: "Foundational Programming Courses"
+params:
+  major_of_interest: CS
+  n_persist: 8
+  output: ~/Documents/manuscript2/
+  plot_height: 3
+  plot_width: 6.5
+  tikz_output: ~/Documents/manuscript2/figures
+  svg_output: ~/ENGE/defense/img
+  svg_width: 7
+  svg_height: 4
+output:
+  html_document:
+    df_print: paged
+  html_notebook:
+    df_print: paged
+---
+
+The focus of this report is the role the intro courses CS 1114 and CS 2114 play on students' matriculation into CS, leaving CS, and earning a CS degree.
+
+```{r setup}
+library(tidyverse)
+library(tikzDevice)
+library(xtable)
+library(gmodels)
+library(lmtest)
+library(cmprsk)
+library(curry)
+library(DescTools)
+library(car)
+
+library(vtir)
+library(racadia)
+library(vtirdata)
+library(COEanalysis)
+
+options("xtable.include.rownames" = FALSE,
+        xtable.caption.placement = "top",
+        xtable.booktabs = TRUE)
+
+write.xtable <- function(xtbl, path_prefix = params$output, ...) {
+  print(xtbl,
+      file = file.path(path_prefix, paste0(attr(xtbl, "label"), ".tex")), ...)
+}
+
+pretty_demographic_levels <- function(.data) {
+  .data %>%
+    mutate(first_generation = fct_recode(fct_relevel(first_generation, c("N")), 
+                                         `First-Generation` = "Y", 
+                                         `Continuing-Generation` = "N"),
+           urm = fct_recode(fct_relevel(urm, c("N")), URM = "Y", `Non-URM` = "N"),
+           gender = fct_relevel(gender, "Male"))
+}
+
+valid_path <- function(path) {
+  !is.na(path) & dir.exists(path)
+}
+
+
+```
+
+
+```{r load-data, cache=TRUE, results=FALSE}
+vtir_terms %>%
+  filter(student_level < 69, college_code == 5 | major == "CEM") ->
+  coe_student_records
+
+vtir_degrees %>% 
+  filter_coe_degrees(coe_undergrad_data) ->
+  coe_degree_data
+
+vtir_terms %>%
+  semi_join(coe_undergrad_records, by = "id") %>%
+  filter(major == "CS") ->
+  ever_in_cs
+
+vtir_students[is.na(vtir_students$sat_math) & is.na(vtir_students$sat_verbal), c("sat_math", "sat_verbal")] <- act2sat(vtir_students)[is.na(vtir_students$sat_math) & is.na(vtir_students$sat_verbal),]
+```
+
+# Who takes CS1 and CS2
+
+# Grades and Demographics {.tabset}
+
+## Full Fit
+
+```{r grade grouping and demographics}
+library(nnet)
+
+or_se <- function(model) {
+  broom::tidy(model) %>% 
+    mutate(or = exp(estimate),
+           var.diag = diag(vcov(model)),
+           or.se = sqrt(or^2 * var.diag)) %>%
+    select(or.se) %>% unlist %>% unname
+}
+
+cs1and2_spread %>%
+  #filter(!is.na(CS1_attempts), CS1_group %in% c("sailers", "plodders", "struggling persisters")) %>%
+  inner_join(vtir_students %>% 
+               filter(term_enter >= as_term("Fall 2009")) %>%
+               pretty_demographic_levels(), by = "id") %>%
+  inner_join(vtir_courses %>%
+               filter(subject == "CS", number == "1114") %>%
+               group_by(id) %>%
+               dplyr::summarize(term_cs1 = first(term_course, order_by = term_course)), by = "id") %>%
+  left_join(vtir_terms %>% select(id, term, cumulative_gpa, major), by = c("id", term_cs1 = "term")) %>%
+  filter(gender %in% c("Male", "Female"), !is.na(first_generation)) %>%
+  mutate(CS1_AP = fct_relevel(CS1_AP, "No"),
+         CS1_performance = grade_attempt_groups(CS1_grouped_grade, CS1_attempts, CS1_AP, CS1_transfer),
+         CS1_performance = fct_relevel(if_else(is.na(CS1_attempts) & !is.na(CS2_last_grade), 
+                                               "Alternative",
+                                               as.character(CS1_performance)),
+                                       "Sailer", "Alternative", "Plodder", "Struggler"),
+         CS2_performance = grade_attempt_groups(CS2_grouped_grade, CS2_attempts, CS2_AP, CS2_transfer),
+         major_fct = fct_relevel(fct_other(major, keep = c("GE", "CS", "MATH", "CMDA")), "GE")) %>%
+  droplevels() ->
+  cs1_performance
+```
+
+```{r cs1 performance control}
+cs1_performance %>%
+  filter(!is.na(CS1_performance), CS1_performance != "Alternative") %>%
+  droplevels() %>%
+  mutate_at(vars(starts_with('sat_')), ~ . / 30) ->
+  cs1_performance_logit_data
+
+cs1_performance_logit_data %>%
+  filter(complete.cases(hs_gpa)) ->
+  cs1_performance_logit_data2
+
+cs1_performance_fit <- multinom(CS1_performance ~ gender + urm + first_generation,
+                                data = cs1_performance_logit_data, na.action = na.exclude)
+
+as_table(cs1_performance_fit) ->
+  cs1_performance_tbl
+cs1_performance_xtbl <- xtable::xtable(cs1_performance_tbl,
+                        caption = "Multinomial Logistic Regression Results for Performance in CS1",
+                        label = "tab:cs1_performance_model")
+
+write.xtable(cs1_performance_xtbl)
+cs1_performance_tbl
+
+nullmod <- update(cs1_performance_fit, . ~ 1)
+
+summary(cs1_performance_fit)
+PseudoR2(cs1_performance_fit, which = "McFaddenAdj")
+BIC(cs1_performance_fit)
+#cs1_performance_mlogit_data <- mlogit.data(cs1_performance %>% select(id, CS1_performance, gender, urm, first_generation), choice = "CS1_performance", format = "wide", id.var = "id", alt.levels = c("Sailer", "Plodder", "Struggler", "Alternative"))
+# m1 <-  mlogit(CS1_performance ~ 1 | gender + urm + first_generation, data = cs1_performance_logit_data)
+```
+
+# Full Performance Model
+```{r cs1 performance full model}
+#cs1_performance_full_fit <- update(cs1_performance_fit, . ~ . + CS1_AP + sat_math)
+cs1_performance_full_fit <- update(cs1_performance_fit, . ~ . + sat_math + sat_verbal + CS1_AP)
+
+# multinom(CS1_performance ~ gender + urm + first_generation + CS1_AP + sat_math + sat_verbal + sat_writing,
+#                                      data = cs1_performance %>%
+#                                        filter(CS1_performance != "Alternative") %>%
+#                                        mutate_at(vars(starts_with('sat_')), ~ . / 10))
+
+as_table(cs1_performance_full_fit) %>%
+  mutate(Variable = str_replace(Variable, "Yes", "CS AP") %>%
+           str_replace("sat_math", "Math SAT") %>%
+           str_replace("sat_verbal", "Verbal SAT"),
+         Variable = fct_relevel(Variable, "Female", "URM", "First-Generation", "Math SAT", "Verbal SAT", "CS AP")) %>%
+  arrange(Variable) ->
+  cs1_performance_full_tbl
+# cs1_performance_full_xtbl <- xtable(cs1_performance_tbl,
+#                         caption = "Multinomial Logistic Regression Results for Performance in CS1",
+#                         label = "tab:cs1_performance_model")
+# 
+# write.xtable(cs1_performance_xtbl)
+cs1_performance_full_tbl
+summary(cs1_performance_full_fit)
+PseudoR2(cs1_performance_full_fit, which = "McFaddenAdj")
+BIC(cs1_performance_full_fit)
+# TODO: maybe McFadden's R^2
+```
+
+```{r model reduction}
+vif(cs1_performance_full_fit)
+model1 <- update(cs1_performance_full_fit, . ~ . + major_fct)
+#lrtest(cs1_performance_full_fit, model1)
+PseudoR2(model1, which = "McFaddenAdj")
+```
+
+# Matriculation into CS
+
+## Matriculation Data
+```{r cs1 amd cs matriculation}
+vtir_students %>% 
+  filter(gender != "Not Reported", !is.na(first_generation), term_enter >= 200909) %>%
+  pretty_demographic_levels() %>%
+  inner_join(vtir_courses %>%
+               filter(subject == "CS", number == "1114") %>%
+               group_by(id) %>%
+               dplyr::summarize(term_cs1 = dplyr::first(term_course, order_by = term_course),
+                                term_last_cs1 = dplyr::last(term_course, order_by = term_course)), by = "id") %>%
+  inner_join(cs1and2_spread %>% 
+               #filter(CS1_attempts > 0) %>%
+               mutate(CS1_performance = grade_attempt_groups(CS1_grouped_grade, CS1_attempts, CS1_AP, CS1_transfer)), by = "id") %>%
+  left_join(vtir_terms %>% select(id, term, cumulative_gpa, major), by = c("id", term_cs1 = "term")) -> #%>%
+  #filter(CS1_attempts > 0) ->
+  cs1_students
+
+cs1_students %>%
+  filter(major == "GE", term_last_cs1 <= as_term("Spring 2017")) %>% #, term_cs1 <= as_term("Spring 2016")
+  left_join(coe_undergrad_records %>%
+              inner_join(cs1_students %>%
+                           select(id, term_cs1, term_last_cs1), by = "id") %>%
+              filter(term > term_cs1, term - term_last_cs1 <= 1) %>%
+              group_by(id) %>%
+              dplyr::summarize(matriculate_cs = any(major == "CS"),
+                        last_major = last(major, order_by = term)), by = "id") %>%
+  left_join(coe_undergrad_records %>%
+               filter(major == "CS") %>%
+               group_by(id) %>%
+               dplyr::summarize(term_cs_matriculation = dplyr::first(term, order_by = term)) %>%
+               ungroup(), by = "id") %>%
+  mutate(matriculate_cs = replace(matriculate_cs, is.na(matriculate_cs), FALSE)) %>%
+  droplevels() %>%
+  filter(CS1_performance != "Alternative") ->
+  cs1_student_matriculation
+```
+
+```{r cs1 matriculation model fit}
+#xtabs(~ grade_cs1_grouped + gender + urm + first_generation + matriculate_cs, cs1_student_matriculation)
+model0 <- glm(matriculate_cs ~ CS1_performance*(gender + urm + first_generation), 
+                                family = binomial(link = "logit"), data = cs1_student_matriculation)
+model1 <- update(model0, . ~ . - CS1_performance:(gender + urm + first_generation))
+lrtest(model0, model1)
+```
+Interaction terms do not result in a significantly different model
+
+```{r cs1 matriculation control}
+model_control <- update(model0, . ~ . - CS1_performance:(gender + urm + first_generation) - CS1_performance)
+summary(model_control)
+exp(coef(model_control))
+PseudoR2(model_control, which = "McFaddenAdj")
+```
+
+```{r cs1 matriculation final model}
+cs1_cs_matriculation_fit <- model1
+summary(cs1_cs_matriculation_fit)
+exp(coef(cs1_cs_matriculation_fit))
+PseudoR2(cs1_cs_matriculation_fit, which = "McFaddenAdj")
+```
+
+```{r add some hs stuff}
+cs_matriculation_model2 <- update(cs1_cs_matriculation_fit, . ~ . + cumulative_gpa)
+summary(cs_matriculation_model2)
+exp(coef(cs_matriculation_model2))
+PseudoR2(cs_matriculation_model2, which = "McFaddenAdj")
+vif(cs_matriculation_model2)
+```
+
+```{r cs1_matriculation}
+exp(coef(cs1_cs_matriculation_fit))
+variable_names <- names(coef(cs1_cs_matriculation_fit))
+pretty_names <- function(cnames) {
+  str_replace(cnames, "CS1_performance", "CS1 ") %>%
+  str_replace("CS2_performance", "CS2 ") %>%
+  str_replace("gender", "") %>%
+  str_replace("urm", "") %>%
+  str_replace("first_generation", "") %>%
+  fct_relevel("Female", "URM", "First Generation", "CS1 Plodder", "CS1 Struggler", "CS2 Plodder", "CS2 Struggler")
+}
+
+as.data.frame.glm <- function(model, varnames = NULL) {
+  c <- exp(coef(model))
+  ci <- exp(confint(model))
+
+  if (is.null(varnames)) {
+    varnames <- names(c)
+  }
+
+  df <- bind_cols(data.frame(names = varnames, mean = c), as.data.frame(ci))[-1,]
+  names(df) <- c("variable", "mean", "lower", "upper")
+  df %>%
+    mutate(label = paste0(variable, " (", round(mean, 2), ")"),
+           label = factor(label, levels = label[order(variable)])) ->
+    df
+  structure(df, class = c("glmdf", class(df)))
+}
+
+as.data.frame(cs1_cs_matriculation_fit) %>%
+  mutate(label = pretty_names(label),
+         label = factor(label, levels = label[order(variable)])) ->
+  cs1_cs_matriculation_df
+
+ggforest(cs1_cs_matriculation_df) + 
+  labs(title = "Odds ratios for CS matriculation") +
+  theme(text = element_text(size=14)) ->
+  cs1_cs_matriculation_p
+
+ggsavetikz(cs1_cs_matriculation_p, file.path(params$tikz_output, 'cs1_cs_matriculation_or.tex'), 
+           standAlone = TRUE, verbose = FALSE, sanitize = TRUE)
+
+if(valid_path(params$svg_output))
+  ggsave(file.path(params$svg_output,"cs1_cs_matriculation_or.svg"), cs1_cs_matriculation_p, 
+         width = params$svg_width, 
+         height = params$svg_height)
+
+cs1_cs_matriculation_p
+```
+
+```{r cs matriculation model fit}
+cs1_matriculation_control_fit <- update(cs1_cs_matriculation_fit, . ~ . - CS1_performance)
+PseudoR2(cs1_matriculation_control_fit, which = "McFaddenAdj")
+PseudoR2(cs1_cs_matriculation_fit, which = "McFaddenAdj")
+```
+
+# CS1 Sailers and Matriculation
+
+```{r CS1 sailer matriculation model}
+# cs1_sailer_matriculation_fit <- glm(matriculate_cs ~ gender + urm + first_generation, 
+#                                 family = binomial(link = "logit"), data = cs1_student_matriculation %>% filter(CS1_performance == "Sailer"))
+# cs1_sailer_matriculation_p <- CSMigration::ggforest(cs1_sailer_matriculation_fit) + labs(title = "Odds ratio for CS1 Sailers Matricuation into CS")
+# ggsavetikz(cs1_sailer_matriculation_p, file.path(params$tikz_output, 'cs1_sailer_matriculation_or.tex'), 
+#            standAlone = TRUE, verbose = FALSE, sanitize = TRUE)
+# cs1_sailer_matriculation_p
+
+cs1_student_matriculation %>%
+  filter(!is.na(CS1_performance), CS1_performance != "Alternative") %>%
+  group_by(CS1_performance) %>%
+    dplyr::summarize(Ntotal = n(),
+            Nmatriculate = sum(matriculate_cs),
+            All = 100 * Nmatriculate / Ntotal,
+            Nwomen = sum(gender == "Female"),
+            Female = 100 * sum(gender == "Female" & matriculate_cs) / Nwomen,
+            Nurm = sum(urm == "URM"),
+            URM = 100 * sum(urm == "URM" & matriculate_cs) / Nurm,
+            Nfirstgen = sum(first_generation == "First-Generation"),
+            FirstGeneration = 100 * sum(first_generation == "First-Generation" & matriculate_cs)/ Nfirstgen) %>%
+  gather(demographic, pct, c(All, Female, URM, FirstGeneration)) %>%
+  mutate(demographic = fct_relevel(demographic, "All", "Female", "URM")) %>%
+  ggplot(aes(demographic, pct)) +
+  geom_col(fill = "maroon") +
+  geom_label(aes(label = round(pct,2)), nudge_y = -5, color = "black") +
+  facet_grid(rows = vars(CS1_performance)) +
+  labs(y = "percent matriculating") ->
+  cs1_matricuation_by_performance_p
+ggsavetikz(cs1_matricuation_by_performance_p, file.path(params$tikz_output, 'cs_matriculation_by_cs1_performance.tex'), 
+            standAlone = TRUE, sanitize = TRUE, verbose = FALSE)
+
+if(valid_path(params$svg_output))
+  ggsave(file.path(params$svg_output,"cs_matriculation_by_cs1_performance.svg"),
+         cs1_matricuation_by_performance_p, 
+         width = params$svg_width, 
+         height = params$svg_height)
+
+cs1_matricuation_by_performance_p
+```
+
+```{r cs1 sailer matriculation chi2}
+cs1_sailer_chi2 <- chisq.test(xtabs(~ matriculate_cs + first_generation, data = cs1_student_matriculation %>% filter(CS1_performance == "Sailer")))
+```
+
+Only first-generation has a significant association with likelihood to matriculate into CS ($\chi^2(`r cs1_sailer_chi2$parameter`) = `r round(cs1_sailer_chi2$statistic,1)`, p < 0.05$).
+
+While none of the demographic variables show a significant effect on CS matriculation, the fact that the odds ratio for URM plodders shifted to the right of 1 compared to Sailers aligns with 
+
+# Effects of Opting out of CS1
+
+```{r }
+term_enter_max <- max_degree_term - 600
+
+coe_undergrad_data %>%
+  inner_join(coe_undergrad_records %>%
+               filter(major == "CS") %>%
+               group_by(id) %>%
+               dplyr::summarize(term_cs_matriculation = dplyr::first(term, order_by = c(major == "CS", term))) %>%
+               ungroup(), by = "id") ->
+  cs_students
+
+cs_students %>%
+  left_join(coe_degree_data %>% 
+              filter(major == "CS") %>%
+              select(id, term_degree, years_to_degree, major), by = "id") %>%
+  left_join(cs1and2_spread, by = "id") %>%
+  mutate(hasDegree = !is.na(years_to_degree),
+         CS1_performance = grade_attempt_groups(CS1_grouped_grade, CS1_attempts, CS1_AP, CS1_transfer),
+         CS2_pass = CS1_grouped_grade %in% c("AB", "C") | hasDegree) %>%
+  filter(term_enter <= term_enter_max, 
+         !is.na(first_generation), gender != "Not Reported") %>%
+  droplevels() ->
+  #semi_join(cs_exit_events, by = "id") ->
+  cs_student_degrees
+xtabs(~ hasDegree + CS1_performance, cs_student_degrees)
+```
+
+```{r cs degrees by cs1 group}
+model0 <- glm(hasDegree ~ CS1_performance*(gender + urm + first_generation), 
+              family = binomial(link = "logit"), data = cs_student_degrees)
+model1 <- update(model0, . ~ . - CS1_performance:(gender + urm + first_generation))
+lrtest(model0, model1)
+```
+No significant difference in model by removing interaction terms.
+
+```{r cs degrees by cs1 group ggforest}
+cs_degree_fit <- model1
+ggforest.glm(cs_degree_fit) + theme_minimal()
+```
+
+
+```{r cs degree sans urm}
+model_sans_urm <- update(cs_degree_fit, . ~ . - urm)
+lrtest(cs_degree_fit, model_sans_urm)
+```
+```{r cs degree sans first_generation}
+model_sans_gen <- update(cs_degree_fit, . ~ . - first_generation)
+lrtest(cs_degree_fit, model_sans_gen)
+```
+```{r cs degree sans gender}
+model_sans_gender <- update(cs_degree_fit, . ~ . - gender)
+lrtest(cs_degree_fit, model_sans_gender)
+```
+
+```{r cs degree just performance}
+cs_degree_performance_fit <- update(cs_degree_fit, . ~ . - urm - first_generation - gender)
+lrtest(cs_degree_fit, cs_degree_performance_fit)
+```
+
+```{r cs degree CS AP}
+cs_degree_csap_fit <- update(cs_degree_performance_fit, . ~ . + CS1_AP)
+lrtest(cs_degree_csap_fit, cs_degree_performance_fit)
+```
+
+```{r cs degree gender ggforest}
+CSMigration::ggforest(cs_degree_performance_fit)
+```
+
+# Strugglers graduation time
+
+```{r cs events}
+graduation_max_term <- max_degree_term- 600
+
+# cs1_student_matriculation %>%
+#   filter(matriculate_cs) ->
+#   cs1_students
+
+coe_undergrad_data %>%
+  inner_join(coe_undergrad_records %>%
+               filter(major == "CS") %>%
+               group_by(id) %>%
+               dplyr::summarize(term_cs_matriculation = dplyr::first(term, order_by = term)) %>%
+               ungroup(), by = "id") ->
+  cs_students 
+
+coe_undergrad_records %>% 
+  inner_join(cs_students %>% 
+               select(id, term_cs_matriculation), by = "id") -> 
+  cs_records
+
+cs_students %>%
+  select(id, term_cs_matriculation) %>%
+  left_join(coe_degree_data %>% 
+              filter(major == "CS") %>%
+              select(id, term_degree, years_to_degree, major), by = "id") %>%
+  mutate(hasDegree = !is.na(years_to_degree)) ->
+  cs_degrees
+
+cs_records %>%
+  group_by(id) %>%
+  dplyr::summarize(
+    last_term = dplyr::last(term, order_by = term),
+    last_major = dplyr::last(major, order_by = term)) ->
+  cs_last_term
+
+#eng_undergrad_records %>% filter(id == "18725") %>% select(id, term, student_level_desc, major) %>% head(20)
+  
+cs_records %>%
+  anti_join(cs_degrees %>% filter(hasDegree), by = "id") %>%
+  filter(term >= term_cs_matriculation, major != "CS") %>%
+  group_by(id) %>%
+  dplyr::summarize(exit_major = dplyr::first(major, order_by = term),
+                   exit_term = dplyr::first(term, order_by = term)) ->
+  leave_cs
+
+coe_undergrad_records %>%
+  semi_join(cs_students, by = "id") %>%
+  group_by(id) %>%
+  dplyr::summarize(last_term = dplyr::last(term, order_by = term),
+                   last_major = dplyr::last(major, order_by = term)) ->
+  last_term
+
+leave_school <- last_term %>% 
+  semi_join(cs_students, by = "id") %>%
+  left_join(cs_students, by = "id") %>% 
+  filter(as_term(last_term) < as_term(max(student_records$term))) %>% # student's who's last recorded term is less than the max we have for all students
+  anti_join(cs_degrees %>% filter(hasDegree), by = "id") # and who have no CS degree
+
+last_term %>% 
+  semi_join(cs_students, by = "id") %>%
+  filter(last_major == "CS") %>%
+  anti_join(cs_degrees %>% filter(hasDegree), by = "id") %>%
+  anti_join(leave_school, by = "id") %>%
+  left_join(coe_undergrad_data, by = "id") %>%
+  filter(term_enter > graduation_max_term) -> 
+  in_progress
+
+rbind(cs_degrees %>% filter(!is.na(term_cs_matriculation), !is.na(term_degree)) %>% select(id, term = term_degree) %>% mutate(event = "CSDegree"),
+      #cs_students %>% select(id, term = cs_matriculation) %>% mutate(event = "EnterCS"),
+      leave_cs %>% select(id, term = exit_term) %>% mutate(event = "LeaveCS"),
+      leave_school %>% select(id, term = last_term) %>% mutate(event = "LeaveCS"),
+      in_progress %>% select(id, term = last_term) %>% mutate(event = "InProgress")) %>%
+  distinct() ->
+  cs_events
+
+cs_events %>%
+  left_join(cs_students, by = "id") %>%
+  left_join(cs1and2_spread %>% 
+              mutate(CS1_performance = grade_attempt_groups(CS1_grouped_grade, CS1_attempts, CS1_AP, CS1_transfer),
+                     CS2_performance = grade_attempt_groups(CS2_grouped_grade, CS2_attempts, CS2_AP, CS2_transfer)), 
+            by = "id") %>%
+  #left_join(cs1_student_matriculation, by = "id") %>%
+  #mutate(CS1_attempts = fct_relevel(if_else(CS1_attempts == 1, "1", "2+"), "1")) %>%
+  left_join(coe_undergrad_records %>% select(id, term, term_count), by = c("id", "term")) %>%
+  mutate(CS1_attempts = fct_other(as.character(CS1_attempts), keep = c("0", "1"), other_level = "2+")) %>%
+  filter(!transfer,
+         #CS2_performance != "Alternative", CS1_AP == "No",
+         term_count <= 15) %>%
+  droplevels() ->
+  cs_exit_events
+```
+
+```{r cs exit cox modesl0}
+coxph_csdegree <- coxph(Surv(term_count, event == "CSDegree") ~ CS2_performance + gender + urm + first_generation,
+                        data = cs_exit_events)
+coxph_csdegree_p <- ggforest(coxph_csdegree)
+#ggsavetikz(coxph_csdegree_p, file.path(params$tikz_output, "coxph_csdegree_cs1and2.tex"), standAlone = TRUE, sanitize = TRUE, verbose = FALSE)
+coxph_csdegree_p
+```
+
+```{r leave cs coxph cs1 and cs2 performance}
+coxph_leavecs_cs1and2 <- coxph(Surv(term_count, event == "LeaveCS") ~ CS2_performance + gender + urm + first_generation,
+                                data = cs_exit_events)
+coxph_leavecs_cs2_p <- ggforest(coxph_leavecs_cs1and2)
+#ggsavetikz(coxph_leavecs_cs2_p, file.path(params$tikz_output, "coxph_leavecs_cs1and2.tex"),
+#           standAlone = TRUE, sanitize = TRUE, verbose = FALSE)
+coxph_leavecs_cs2_p
+```
+
+```{r cs degree coxph cs1 and cs2 performance no alt AP}
+coxph(Surv(term_count, event == "CSDegree") ~ CS2_performance + gender + urm + first_generation,
+                                data = cs_exit_events %>%
+                                  #filter((CS1_performance == "Alternative" & CS1_AP == "No") | (CS1_performance != "Alternative")) %>%
+        filter(CS1_AP == "No") %>%                          
+        droplevels()) ->
+  coxph_csdegree_cs1and2_noAP
+
+coxph_csdegree_cs1and2_noAP_p <- ggforest(coxph_csdegree_cs1and2_noAP)
+#ggsavetikz(coxph_leavecs_cs2_p, file.path(params$tikz_output, "coxph_leavecs_cs1and2.tex"),
+#           standAlone = TRUE, sanitize = TRUE, verbose = FALSE)
+coxph_csdegree_cs1and2_noAP_p
+```
+
+```{r cs graduation cs1 group}
+# coxph(Surv(term_count, event == "CSDegree") ~ CS1_attempts + CS1_grouped_grade + CS2_attempts  + gender + urm + first_generation,
+#                                 data = cs_exit_events %>%
+#                                   #filter((CS1_performance == "Alternative" & CS1_AP == "No") | (CS1_performance != "Alternative")) %>%
+#         filter(CS1_attempts != "0") %>%                          
+#         droplevels()) ->
+#   coxph_csdegree_cs1and2attempts
+# coxph_csdegree_cs1and2_attempts_p <- ggforest(coxph_csdegree_cs1and2attempts)
+
+gggrouped_cmprisk(cs_exit_events %>% filter(CS2_performance != "Alternative"), 
+                  CS2_performance, "cs_exit", list(
+  title = "CS Exit Events and CS2 Performance",
+  color = "CS2 Performance"
+), saveTikz = TRUE)
+```
+```{r risk of leaving by gender}
+# gggrouped_cmprisk(cs_exit_events, 
+#                   gender, "cs_exit", list(
+#   title = "CS Exit Events and Gender",
+#   color = "Gender"
+# ), saveTikz = TRUE)
+
+cs_exit_gender_fit <- grouped_cmprisk(cs_exit_events, gender)
+ggsinglerisk(cs_exit_gender_fit, "LeaveCS") -> p1
+ggsavetikz(p1, file.path(params$tikz_output, 'cs_exit_gender.tex'), height = 3, standAlone = TRUE, sanitize = TRUE, verbose = FALSE)
+if(valid_path(params$svg_output))
+  ggsave(file.path(params$svg_output, "cs_exit_gender.svg"), p1 + labs(title = "Women More Likley to Leave"), 
+         width = params$svg_width, 
+         height = params$svg_height)
+p1
+```
+
+```{r risk of leaving by generation}
+#gggrouped_cmprisk(cs_exit_events, 
+#                  first_generation, "cs_exit", list(
+#  title = "CS Exit Events and Generation",
+#  color = "Generation"
+#), saveTikz = TRUE)
+
+cs_exit_gen_fit <- grouped_cmprisk(cs_exit_events, first_generation)
+ggsinglerisk(cs_exit_gen_fit, "LeaveCS") -> p1
+ggsavetikz(p1, file.path(params$tikz_output, 'cs_exit_first_generation.tex'), height = 3, standAlone = TRUE, sanitize = TRUE, verbose = FALSE)
+if(valid_path(params$svg_output))
+  ggsave(file.path(params$svg_output, "cs_exit_generation.svg"), p1 + labs(title = "First-Generation Students Less Likely to Leave"), 
+         width = params$svg_width, 
+         height = params$svg_height)
+p1
+```
+
+```{r cs graduation logistic regression}
+cs1_performance %>%
+  #filter(complete.cases(sat_math, sat_verbal)) %>%
+  graduation_window(term_enter, 6) %>%
+  filter(CS2_performance != "Alternative") %>%
+  left_join(cs_degrees, by = "id") ->
+  cs_degree_logit_data
+
+cs_degree_logit_control <- glm(hasDegree ~ gender + urm + first_generation,
+                           data = cs_degree_logit_data, na.action = na.omit)
+PseudoR2(cs_degree_logit_control, which = "McFaddenAdj")
+BIC(cs_degree_logit_control)
+```
+```{r cs graduation logistic full fit}
+cs_degree_logit_fit <- update(cs_degree_logit_control, . ~ . + CS1_performance + CS2_performance)
+PseudoR2(cs_degree_logit_fit, which = "McFaddenAdj")
+BIC(cs_degree_logit_fit)
+```
+
+```{r check for colinearity}
+vif(cs_degree_logit_fit)
+1/vif(cs_degree_logit_fit)
+```
+
+```{r corrleation between cs1 and cs2 performance}
+with(cs1_performance %>% 
+       filter(complete.cases(CS1_performance, CS2_performance)) %>%
+       mutate_at(vars(ends_with('_performance')), ~ as.ordered(.)), Hmisc::rcorr(CS1_performance, CS2_performance, type = "pearson"))
+```
+```{r cs degree forest plot}
+as.data.frame(cs_degree_logit_fit) %>%
+mutate(label = pretty_names(label),
+         label = factor(label, levels = label[order(variable)])) %>%
+  ggforest() + 
+  labs(title = "Odds ratios for Earning a CS Degree ") ->
+  cs_degree_logit_fit_p 
+ggsavetikz(cs_degree_logit_fit_p, file.path(params$tikz_output, 'cs_degree_or.tex'), 
+           standAlone = TRUE, verbose = FALSE, sanitize = TRUE)
+#ggsave('~/Downloads/cs_degree_logit_fit.png', cs_degree_logit_fit_p)
+if(valid_path(params$svg_output))
+  ggsave(file.path(params$svg_output, "cs_degree_logit_fit.svg"), cs_degree_logit_fit_p, 
+         width = params$svg_width, 
+         height = params$svg_height)
+cs_degree_logit_fit_p
+```

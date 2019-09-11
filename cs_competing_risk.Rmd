@@ -1,0 +1,326 @@
+---
+title: "Curricular Choke Points"
+params:
+  major_of_interest: CS
+  n_persist: 8
+  output: ~/ENGE/Studies/CSMigration/figures
+  plot_height: 3
+  plot_width: 6.5
+  tikz_output: ~/Documents/manuscript2/figures
+  svg_output: ~/ENGE/defense/img
+  svg_width: 7
+  svg_height: 4
+output:
+  html_document:
+    df_print: paged
+---
+
+The focus of this report is the role the intro courses CS 1114 and CS 2114 play on students' matriculation into CS, leaving CS, and earning a CS degree.
+
+```{r setup}
+library(tidyverse)
+library(tikzDevice)
+library(survival)
+library(survminer)
+library(cmprsk)
+
+library(vtir)
+library(racadia)
+library(vtirdata)
+library(COEanalysis)
+```
+
+
+```{r load-data, cache=TRUE, results=FALSE}
+vtir_terms %>%
+  filter(student_level < 69, college_code == 5 | major == "CEM") ->
+  coe_student_records
+
+vtir_degrees %>% 
+  filter_coe_degrees(coe_undergrad_data) ->
+  coe_degree_data
+
+vtir_terms %>%
+  semi_join(coe_undergrad_records, by = "id") %>%
+  filter(major == "CS") ->
+  ever_in_cs
+
+coe_undergrad_data %>%
+  semi_join(vtir_courses %>%
+              filter(subject == "CS", number == "1944"), by = "id") ->
+  cs1_seminar
+
+max_term <- max(vtir_terms$term, na.rm = TRUE)
+```
+
+## Entry Events
+
+Entry events occure when a student enters a degree granting major. In the context of the COE and FYE, students may enter CS, another COE major, or leave the COE for a different major.
+```{r cs entry events}
+coe_undergrad_data %>%
+  add_composit_vars(coe_undergrad_records) %>%
+  left_join(cs1and2_spread, by = "id") %>%
+  mutate(event = if_else(!is.na(matriculation_major), 
+                         case_when(matriculation_major == "CS" ~ "MatCS",
+                                   is_eng_major(matriculation_major) ~ "MatCOEMajor",
+                                   TRUE ~ "LeaveCOE"),
+                         if_else(term_enter >= max_term - 100,
+                                 "InProgress",
+                                 "LeaveCOE")),
+         term = as_term(if_else(!is.na(matriculation_major), 
+                        as.integer(matriculation_term), as.integer(last_term))),
+         origin = fct_relevel(origin, "Traditional"),
+         CS1_performance = grade_attempt_groups(CS1_grouped_grade, CS1_attempts, CS1_AP, CS1_transfer),
+         CS2_performance = grade_attempt_groups(CS2_grouped_grade, CS2_attempts, CS2_AP, CS2_transfer)) %>%
+    left_join(coe_undergrad_records %>% select(id, term, term_count), by = c("id", "term")) %>%
+    mutate(periods = cut(term_count, 
+                       breaks = c(0, 1.33, 2.66, 3.33, 3.66, 4.33, 4.66, 5.33, 5.66, 6.33, 6.66, 7.33, 7.66, 8.33, 24))) ->
+  cs_entry_events
+
+cs_entry_events %>%
+  semi_join(cs1_seminar, by = "id") ->
+  cs_intent_entry_events
+
+xtabs(~ CS1_performance + event, cs_entry_events)
+```
+
+## Matriculation into CS
+
+```{r}
+library(survival)
+library(survminer)
+cox_fit_matcs <- coxph(Surv(as.numeric(periods), event == "MatCS") ~ gender + urm + first_generation, 
+                       data = cs_entry_events)
+coef(cox_fit_matcs)
+p1 <- ggforest(cox_fit_matcs, data = cs_entry_events) +
+  labs(title = "Hazards ratio for Matriculation into CS")
+p1
+```
+
+```{r cox matriculate cs by course}
+# library(eha)
+# eha_fit <- coxreg(Surv(term_count, event == "MatCS") ~ gender + urm + first_generation, data = cs_entry_events %>% filter(event != "InProgress"))
+# summary(eha_fit)
+# exp(coef(eha_fit))
+
+library(survival)
+library(survminer)
+cox_fit_matcs_cs1 <- coxph(Surv(term_count, event == "MatCS") ~ gender + urm + first_generation + 
+                             CS1_AP + CS1_performance, data = cs_entry_events)
+coef(cox_fit_matcs_cs1)
+coxph_matcs_cs1_p <- ggforest(cox_fit_matcs_cs1, data = cs_entry_events) + labs(title = "Hazards ratio for Matriculation into CS")
+coxph_matcs_cs1_p
+```
+
+```{r cox matriculate cs smaller}
+# library(eha)
+# eha_fit <- coxreg(Surv(term_count, event == "MatCS") ~ gender + urm + first_generation, data = cs_entry_events %>% filter(event != "InProgress"))
+# summary(eha_fit)
+# exp(coef(eha_fit))
+cs_entry_events %>%
+  mutate(CS1_performance = grade_attempt_groups(CS1_grouped_grade, CS1_attempts, CS1_AP, CS1_transfer)) ->
+  cs_entry_events
+cox_fit_matcs_cs1 <- coxph(Surv(term_count, event == "MatCS") ~ gender + urm + first_generation + 
+                             CS1_performance, data = cs_entry_events)
+                             
+coxph_matcs_cs1_p <- ggforest(cox_fit_matcs_cs1, data = cs_entry_events) + labs(title = "Hazards ratio for Matriculation into CS")
+ggsavetikz(coxph_matcs_cs1_p, file.path(params$tikz_output, "coxph_matcs_cs1.tex"), standAlone = TRUE, sanitize = TRUE, verbose = FALSE)
+coxph_matcs_cs1_p
+```
+
+### Cumulative Incidents
+
+```{r cumulative incidents setup}
+library(cmprsk)
+library(curry)
+```
+
+```{r cumulative incidents cs1 transfer}
+gggrouped_cmprisk(cs_entry_events, CS1_performance, "cs_entry", list(
+  title = "CS Entry Events and CS1 Seat",
+  color = "CS1 Performance"
+), saveTikz = TRUE)
+```
+
+Students who transfer in CS1 credit tend to leave the college at similar rates as everyone else after term 4, however before term 4 the have a lower probability of leaving the college. This could be due to the effect of experiencing CS1 as a time to evaluate one's ability to complete a CS degree
+
+
+```{r cumulative incidents cs2 grade}
+gggrouped_cmprisk(cs_entry_events, CS2_performance, "cs_entry", list(
+  title = "CS Entry Events and CS2 Grade",
+  color = "CS2 Performance"
+))
+```
+
+## Exit Events
+
+```{r cs exit events}
+max_degree_term <- max(vtir_degrees$term_degree, na.rm = TRUE)
+graduation_max_term <- max_degree_term- 600
+
+coe_undergrad_data %>%
+  inner_join(coe_undergrad_records %>%
+               filter(major == "CS") %>%
+               group_by(id) %>%
+               dplyr::summarize(cs_matriculation = dplyr::first(term, order_by = term)) %>%
+               ungroup(), by = "id") ->
+  cs_students 
+
+cs_students %>%
+  select(id, cs_matriculation) %>%
+  #has_degree("CS") %>%
+  left_join(coe_degree_data %>% 
+              filter(major == "CS") %>%
+              select(id, term_degree, years_to_degree, major), by = "id") %>%
+  mutate(hasDegree = !is.na(years_to_degree)) ->
+  cs_degrees
+
+# records for students who were ever in CS
+coe_undergrad_records %>% 
+  semi_join(cs_students, by = "id") %>% 
+  left_join(cs_students %>% select(id, cs_matriculation), by = "id") -> 
+  cs_records
+
+cs_records %>%
+  group_by(id) %>%
+  dplyr::summarize(
+    last_term = dplyr::last(term, order_by = term),
+    last_major = dplyr::last(major, order_by = term)) ->
+  cs_last_term
+
+#eng_undergrad_records %>% filter(id == "18725") %>% select(id, term, student_level_desc, major) %>% head(20)
+  
+cs_records %>%
+  anti_join(cs_degrees %>% filter(hasDegree), by = "id") %>%
+  filter(term >= cs_matriculation, major != "CS") %>%
+  group_by(id) %>%
+  dplyr::summarize(exit_major = dplyr::first(major, order_by = term),
+                   exit_term = dplyr::first(term, order_by = term)) ->
+  leave_cs
+
+coe_undergrad_records %>%
+  semi_join(cs_students, by = "id") %>%
+  group_by(id) %>%
+  dplyr::summarize(last_term = dplyr::last(term, order_by = term),
+                   last_major = dplyr::last(major, order_by = term)) ->
+  last_term
+
+leave_school <- last_term %>% 
+  semi_join(cs_students, by = "id") %>%
+  left_join(cs_students, by = "id") %>% 
+  filter(as_term(last_term) < as_term(max(student_records$term))) %>% # student's who's last recorded term is less than the max we have for all students
+  anti_join(cs_degrees %>% filter(hasDegree), by = "id") # and who have no CS degree
+
+last_term %>% 
+  semi_join(cs_students, by = "id") %>%
+  filter(last_major == "CS") %>%
+  anti_join(cs_degrees %>% filter(!hasDegree), by = "id") %>%
+  anti_join(leave_school, by = "id") %>%
+  left_join(coe_undergrad_data, by = "id") %>%
+  filter(term_enter > graduation_max_term) -> 
+  in_progress
+  
+rbind(cs_degrees %>% filter(!is.na(cs_matriculation), !is.na(term_degree)) %>% select(id, term = term_degree) %>% mutate(event = "CSDegree"),
+      #cs_students %>% select(id, term = cs_matriculation) %>% mutate(event = "EnterCS"),
+      leave_cs %>% select(id, term = exit_term) %>% mutate(event = "LeaveCS"),
+      leave_school %>% select(id, term = last_term) %>% mutate(event = "LeaveCS"),
+      in_progress %>% select(id, term = last_term) %>% mutate(event = "InProgress")) %>%
+  distinct() ->
+  cs_events
+
+missing_records <- left_join(cs_degrees %>% 
+                               filter(is.na(cs_matriculation)) %>% 
+                               select(id, term_degree), coe_undergrad_data, by = "id")# %>% 
+  #filter(term < degree_term, student_level <= 69)
+
+cs_events %>%
+  left_join(cs_students %>% 
+              select(id, gender, urm, first_generation, term_enter), by = "id") %>%
+  #left_join(cs_transfer_courses, by = "id") %>%
+  mutate(cohort = term_year(term_enter)) %>%
+  left_join(cs1and2_spread, by = "id") %>%
+  left_join(coe_undergrad_records %>% select(id, term, term_count), by = c("id", "term")) %>%
+  filter(gender != "Not Reported", !is.na(first_generation)) %>%
+  droplevels() %>%
+  filter(!is.na(term_count)) %>% 
+  mutate(CS1_performance = grade_attempt_groups(CS1_grouped_grade, CS1_attempts, CS1_AP, CS1_transfer),
+         CS2_performance = grade_attempt_groups(CS2_grouped_grade, CS2_attempts, CS2_AP, CS2_transfer))->
+  cs_exit_events
+```
+
+## Cox Proportional Hazard Model for Exit Events
+
+```{r cs exit cosph}
+cox_fit_csdegree_demographics <- coxph(Surv(term_count, event == "CSDegree") ~ CS2_performance + urm + gender + first_generation, data = cs_exit_events)
+coef(cox_fit_csdegree_demographics)
+coxph_csdegree_demographics_p <- ggforest(cox_fit_csdegree_demographics, data = cs_exit_events) + 
+  labs(title = "Hazards ratio for CS Degree")
+ggsavetikz(coxph_csdegree_demographics_p, file.path(params$tikz_output, "coxph_csdegree_cs1.tex"), standAlone = TRUE, sanitize = TRUE, verbose = FALSE)
+coxph_csdegree_demographics_p
+```
+```{r cs exit cosph cs1}
+#cs_exit_events %>% mutate(CS1_seat = CS1_seat == "Yes") -> cs_exit_events
+cox_fit_csdegree_cs1 <- coxph(Surv(term_count, event == "LeaveCS") ~ gender + urm + first_generation + CS1_performance, data = cs_exit_events)
+coef(cox_fit_csdegree_cs1)
+coxph_leavecs_cs1_p <- ggforest(cox_fit_csdegree_cs1, data = cs_exit_events) + 
+  labs(title = "Hazards ratio for CS Degree")
+ggsavetikz(coxph_leavecs_cs1_p, file.path(params$tikz_output, "coxph_leavecs_cs1.tex"), standAlone = TRUE, sanitize = TRUE, verbose = FALSE)
+coxph_leavecs_cs1_p
+```
+
+```{r cs exit degree cosph cs2}
+cox_fit_csdegree_cs2 <- coxph(Surv(term_count, event == "LeaveCS") ~ 
+                                CS2_performance + gender + urm + first_generation, data = cs_exit_events
+                              )
+coef(cox_fit_csdegree_cs2)
+coxph_csdegree_cs2_p <- ggforest(cox_fit_csdegree_cs2, data = cs_exit_events) + 
+  labs(title = "Hazards ratio for CS Degree")
+ggsavetikz(coxph_csdegree_cs2_p, file.path(params$tikz_output, "coxph_leavecs_cs2.tex"), standAlone = TRUE, sanitize = TRUE, verbose = FALSE)
+coxph_csdegree_cs2_p
+```
+
+```{r cs exit leave cosph cs2}
+cox_fit_leavecs_cs2 <- coxph(Surv(term_count, event == "LeaveCS") ~ 
+                               gender + urm + first_generation + CS1_performance + CS2_performance, 
+                             data = cs_exit_events  %>% droplevels())
+coef(cox_fit_leavecs_cs2)
+coxph_leavecs_cs2_p <- ggforest(cox_fit_leavecs_cs2, data = cs_exit_events) + 
+  labs(title = "Hazards ratio for CS Degree")
+ggsavetikz(coxph_leavecs_cs2_p, file.path(params$tikz_output, "coxph_leavecs_cs1and2.tex"), standAlone = TRUE, sanitize = TRUE, verbose = FALSE)
+coxph_leavecs_cs2_p
+```
+
+```{r cs graduation cs1 attempts}
+gggrouped_cmprisk(cs_exit_events, CS1_performance, "cs_exit", list(
+  title = "CS Exit Events grouped by CS1 Performance",
+  color = "CS1 Performance"
+))
+```
+
+```{r cs graduation cs2 grade}
+gggrouped_cmprisk(cs_exit_events, CS2_performance, "cs_exit", list(
+  title = "CS Exit Events and CS2 Grade",
+  color = "CS2 Grade Range"
+))
+```
+
+```{r cs graduation cs1 transfer}
+gggrouped_cmprisk(cs_exit_events, CS1_performance, "cs_exit", list(
+  title = "CS Exit Events and CS1 Performance",
+  color = "CS1 Seat"
+), saveTikz = FALSE)
+```
+
+```{r cs graduation cs1 AP}
+gggrouped_cmprisk(cs_exit_events, CS1_AP, "cs_exit", list(
+  title = "CS Exit Events and CS AP Status",
+  color = "CS AP"
+), saveTikz = FALSE)
+```
+
+```{r cs graduation cs1 transfer}
+gggrouped_cmprisk(cs_exit_events, cohort, "cs_exit", list(
+  title = "CS Exit Events and CS Cohort",
+  color = "Cohort"
+), saveTikz = FALSE)
+```

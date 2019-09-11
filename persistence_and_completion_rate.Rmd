@@ -1,0 +1,480 @@
+---
+title: "Persistence and Degree Rate across Majors"
+author: "Darren Maczka"
+date: "July 4, 2018"
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  pdf_document: default
+code_folding: hide
+params:
+  graduation_window: 6
+  major_of_interest: CS
+  n_persist: 8
+  output: ~/ENGE/Studies/Computing Intent/figures
+  plot_height: 3
+  plot_width: 6.5
+  tikz_output: ~/Documents/manuscript1/figures
+  svg_output: ~/ENGE/defense/img
+  svg_width: 7
+  svg_height: 4
+bibliography: bibliography.bib
+---
+
+```{r install, include=FALSE, eval=FALSE}
+devtools::document("~/ENGE/workspace/deepr")
+devtools::install("~/ENGE/workspace/deepr")
+devtools::document("~/ENGE/workspace/vtir")
+devtools::install("~/ENGE/workspace/vtir")
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, root.dir="~/ENGE/Studies/Computing Intent")
+library(tidyverse)
+library(data.table)
+library(pander)
+library(tikzDevice)
+
+library(pandy)
+library(vtir)
+library(vtirdata)
+library(COEanalysis)
+
+panderOptions("table.split.table", 120)
+
+max_degree_term <- as_term(max(coe_vtir_degrees$term_degree))
+graduation_window <- graduation_window_fct(max_degree_term)
+matriculation_degrees <- matriculation_degrees_fct(coe_vtir_degrees)
+has_degree <- has_degree_fct(coe_degree_data)
+
+valid_path <- function(path) {
+  !is.na(path) & dir.exists(path)
+}
+
+hokie_scale_color <- scale_color_manual(values=c("#630031", "#cf4420"))
+hokie_scale_fill <- scale_fill_manual(values=c("#cf4420", "#82A1C9"))
+```
+
+TODO: 1) Go through and remove early matriculatiom_major factor lumping, 2) use fall_admissions_term, 3) compare with degree_rate_comparison.Rmd
+
+# Introduction and Motivation
+
+I liked [@ohland_race_2011]'s analysis and plots to discuss gender and race differences in success in engineering and wanted to do the same type of analysis but across majors within engineering. This was motivated by the data point that suggests trends in First Gen and URM success are different in CS compared to the college at large.  
+
+[@ohland_race_2011] argue it is critical to examin multiple measures of success when comparing groups. They use the 8-semester persistences measure and 6-year graduation rate measure and mention that 8-semester persistences has been demonstrated to be a strong predictor of 6-year graduation. They also define `yield` as the percentage of students who persist for 8-semesters who go on to earn a degree within 6 years:
+
+$$
+\begin{aligned}
+\text{6-year graduation rate} &= \frac{\text{\\# graduating in 6 years}}{\text{\\# persisting to 8th semester}} \times \frac{\text{\\# persisting to 8th semester}}{\text{\\# matriculating}}\\
+&= \text{% yield} \times \text{% persisting to 8th semester}
+\end{aligned}
+$$
+
+# First Term
+
+The matriculation term is defined as the first term in which a given student is enrolled in the college. There are no guarantees of consecutive enrollment, so even if a student is enrolled in the college for only a single semester they count as matriculated into engineering with that term considered their first. 
+
+
+## CS Graduation Rates
+
+```{r ge-cs-degree-rates-gender}
+matriculation_degrees <- matriculation_degrees_fct(coe_vtir_degrees)
+coe_undergrad_data %>% 
+  filter(!is.na(first_generation)) %>%
+  graduation_window(term_enter, params$graduation_window) %>%
+  left_join(coe_undergrad_data %>%
+              matriculation_degrees(matriculation_major) %>%
+              select(id, term_degree, years_to_degree, degree_major = major), by = "id") %>%
+  summarize_gradrate()
+```
+
+# Persistence 
+
+For the time being I am using [@ohland_race_2011]'s recommendation of 8-semester persistence from the time of matriculation into the *college*. It may make more since to change this to 6-semester persistence in one's matriculation major. Bachelors degrees are joined at this stage. At this stage I filter out degrees from students who did not persist through 8 semesters. This "fixes" the over-100% yield issue from before, but I would still like to understand why we have a good number of records for which the student earns a degree in 6 or fewer years but persisted for fewer than 8 semesters.
+
+```{r persistence}
+coe_undergrad_data %>%
+  filter(coe_admit_major == "GE", coe_admit_student_level_desc == "Freshman") %>% 
+  graduation_window(term_enter, params$graduation_window) %>% 
+  #filter(term_enter <= as_term("Fall 2012")) %>%
+  #filter(coe_matriculation_term <= persistence_max_term) %>% # select students who entered the college early enough to have persisted 8 semesters
+  left_join(coe_undergrad_records %>% 
+              filter(college_code == 5 | major == "CEM") %>%
+              group_by(id) %>%
+              dplyr::summarize(max_term = max(term_count)), # join with the max term they were enrolled in the college
+            by = "id")  -> #%>%
+  #mutate(gender = fct_relevel(gender, c("Male")),
+  #       urm = fct_recode(urm, "URM" = "Y", "Non-URM" = "N"),
+  #       first_generation = fct_recode(first_generation, "")) ->
+  coe_persist_students
+```
+
+Note: At this point there are 146 students in `first_term_eng` who are not in `student_persistence_eng`, presumably because their matriculation term into the college does not meet the filter requirement. It is also useful to note that the ids in `first_term_eng` are identical to those in `undergrads`, so none of those in the original set were lost due to subsequent filtering.
+
+Putting all the pieces together yields our `persistence_and_success` table. The least frequent majors are lumped into an `Other` category to help reduce the data on the plots. 
+
+$$
+\begin{aligned}
+\text{6-year graduation rate} &= \frac{\text{# graduating in 6 years in matriculation major}}{\text{# persisting to 8th semester in engineering}} \times \frac{\text{# persisting to 8th semester in engineering}}{\text{# matriculating into major}}\\
+&= \text{% yield} \times \text{% persisting to 8th semester}
+\end{aligned}
+$$
+
+```{r persistence-and-success-data}
+left_join(coe_undergrad_records, coe_undergrad_data %>% # add up number of terms in matriculation_major
+                                           select(id, matriculation_major), by = "id") ->
+  coe_student_records_matmajor
+
+coe_persist_students %>%
+  # Since we are counting 6-year grad window from start of undegrad, not matriculating into tech, we do not need this filter
+  #filter(coe_matriculation_term <= graduation_max_term) %>% 
+  filter(!is.na(matriculation_major)) %>% 
+  left_join(filter_count_terms(coe_student_records_matmajor, 
+                               terms_in_major, major == matriculation_major), by = "id") %>%
+  left_join(filter_count_terms(coe_student_records_matmajor,
+                               terms_in_coe, college_code == 5 | major == "CEM"), by = "id") %>%
+  #left_join(eng_spread_degrees %>% rename(degree_term = term), by = "id") %>% 
+  left_join(coe_persist_students %>% 
+              matriculation_degrees(matriculation_major) %>%
+              rename(degree_major = major), by = "id") %>%
+  mutate(hasDegree = !is.na(degree_major)) ->
+  #add_degree_status(matriculation_major) ->
+  persistence_and_degrees 
+```
+
+# Comparing Success across Majors
+
+Now we can generate that data frames to feed to ggplot. For some reason I have not been able to get degree rate contour lines to properly display when I convert to percentages, so all values are reported as proportions on `[0,1]`.
+
+## Test of Success Code
+```{r test-of-success-table-generation}
+persistence_and_degrees %>% 
+  #filter(!is.na(last_matriculation_major)) %>%
+  pandy::pandy_summarize(year=term_year(term_enter), persist_term = 8, strict = FALSE) 
+```
+
+These match up with the COE DataBook numbers
+
+## Persistence and Yield Across Majors
+
+```{r pandy_by_major}
+persistence_and_degrees %>%
+  mutate(matriculation_major = fct_rev(fct_relevel(matriculation_major, params$major_of_interest))) %>%
+  pandy::pandy_summarize(matriculation_major, persist_term = params$n_persist, strict = FALSE) %>%
+  filter(is_eng_major(matriculation_major)) ->
+  pandy_by_major
+
+n_persist_terms <- attr(pandy_by_major, "n_persist_term")
+
+inspect_majors <- c("CS", "CPE", "CE", "ME")
+# TODO: Clean up functions. Can we ggplotize this?
+# p + gradrate_contours(c(.6, .7, .8), labels = TRUE)
+#contour_labels <- data.frame(y = c(.7, .8, .9)) %>% 
+#  mutate(value = paste0(y*100, "% grad rate"), angle = (180/pi) * (-y / (1.24)))
+
+contour_labels <- data.frame(y = c(.6, .7, .8, .9)) %>% 
+  mutate(value = paste0(y*100, "% grad rate"), angle = (-y*35))
+
+ggplot(pandy_by_major %>%
+         filter(n > 5), aes(persist, yield)) +
+  stat_function(fun = function(x) c(.60 / x, .70 / x, .80 / x, .90 / x), alpha = 0.1) +
+  #geom_dl(aes(label = value), data = contour_labels) +
+  geom_text(aes(label = value, y = y*1.015, x = 0.995, angle = angle), alpha = 0.5, data = contour_labels, nudge_x = -0.025) +
+  geom_point(aes(fill = if_else(matriculation_major == params$major_of_interest, params$major_of_interest, "Other"), size = n), color = "black", shape= 21, stroke = 0.5) +
+  xlim(c(.60, 1.00)) +
+  ylim(c(.60, 1.00)) + 
+  hokie_scale_fill +
+  labs(fill = "COE Major") +
+  xlab(paste0("persist through ", params$n_persist,"th semester, first declared major through 6th (ratio)")) +
+  ylab("yield (ratio)") + 
+  #ggtitle("CS as a whole is on the high end of graduation rates compared to other majors.") ->
+  ggtitle(paste0(params$major_of_interest, " in the context of other COE majors")) ->
+  p
+
+base_name <- paste0(params$major_of_interest, "_in_coe")
+if (valid_path(params$output)) ggsave(file.path(params$output, paste0(base_name, ".png")), p, 
+                                      width = 6, height = 4, units = "in")
+p
+```
+
+```{r pandy_representative_majors}
+p <- ggplot(pandy_by_major %>%
+         filter(n > 5, matriculation_major %in% inspect_majors), aes(persist, yield)) +
+  stat_function(fun = function(x) c(.60 / x, .70 / x, .80 / x, .90 / x), alpha = 0.1) +
+  #geom_dl(aes(label = value), data = contour_labels) +
+  geom_text(aes(label = value, y = y*1.015, x = 0.995, angle = angle), alpha = 0.5, data = contour_labels, nudge_x = -0.025) +
+  geom_point(aes(color = matriculation_major), size = 4) +
+  xlim(c(.60, 1.00)) +
+  ylim(c(.60, 1.00)) + 
+  labs(color = "Matriculation Major") +
+  xlab(paste0("persist through ", params$n_persist,"th semester (ratio)")) +
+  ylab("yield (ratio)") + 
+  ggtitle("CS and ISE have similar graduation rates\nbut through different machanisms") 
+
+if (valid_path(params$output)) ggsave(file.path(params$output, "p_and_y_by_major.png"), p, 
+                                      width = 6, height = 4, units = "in")
+ggsavetikz(p, file.path(params$tikz_output, "p_and_y_by_major.tex"), width = 6, height = 6, standAlone = TRUE, sanitize = TRUE, verbose = FALSE)
+p
+```
+
+These graduatation rate numbers appear high compared to the COE DataBook. This is a result of the data only including students that matriculate into a degree-granting major. In other words, students who are admitted to the COE as GE but leave without declaring a major are not included in this graduation rate calculation.
+
+```{r compare-major-graduation-rates}
+  pandy_by_major %>%
+  summarize(n = sum(n), n_semester_persist = sum(n_semester_persist), n_year_degree = sum(n_year_degree)) %>%
+  add_persist_and_yield()
+```
+
+It is important to remind the reader then that the 8 semester persistence rate is really the number of people who matriculated to a COE major *other than GE* and persisted 8 semesters.
+
+# CS in the COE {.tabset}
+
+```{r data for presentation}
+bind_rows(persistence_and_degrees %>%
+            pandy::pandy_summarize(matriculation_major) %>%
+            mutate(variable = "All", category = "None"),
+          persistence_and_degrees %>% 
+            pandy::pandy_summarize(matriculation_major, gender) %>%
+            rename(variable = gender) %>%
+            mutate(category = "Gender"),
+          persistence_and_degrees %>% 
+            pandy::pandy_summarize(matriculation_major, urm) %>%
+            rename(variable = urm) %>%
+            mutate(category = "URM"),
+          persistence_and_degrees %>% 
+            pandy::pandy_summarize(matriculation_major, first_generation) %>%
+            rename(variable = first_generation) %>%
+            mutate(category = "First-Generation")) %>%
+  filter(n >= 15) %>%
+  write_csv("~/ENGE/defense/data/persistence_and_yield.csv")
+```
+## Across Gender {.tabset}
+
+### Plot
+
+```{r cs-within-coe-gender}
+persistence_and_degrees %>% 
+  facet_plot(matriculation_major, gender) +
+  hokie_scale_fill +
+  labs(color = "Computer Science",
+       title = if (params$major_of_interest == "CS") {
+         "Female CS students have one of the lowest graduation rates."    
+       } else {
+         paste0(params$major_of_interest, " in the context of other COE majors")
+       }) + lims(y = c(.6, 1), x = c(.6, 1)) -> p
+
+base_name <- paste0(params$major_of_interest, "_in_coe_by_gender")
+if (valid_path(params$output)) 
+  ggsave(file.path(params$output, paste0(base_name, ".png")), p, 
+         width = params$plot_width, height = params$plot_height, units = "in") 
+
+if(valid_path(params$svg_output))
+  ggsave(file.path(params$svg_output, paste0(base_name, ".svg")), p, 
+         width = params$svg_width, 
+         height = params$svg_height)
+
+if (params$major_of_interest == "CS") 
+  ggsavetikz(p, file.path(params$tikz_output, paste0(base_name, ".tex")), width = params$plot_width, height = params$plot_height, standAlone = TRUE, sanitize = TRUE, verbose = FALSE)
+#tikz(file.path(params$tikz_output, "cs_in_coe_by_gender.tex"), width = params$plot_width, height = params$plot_height, standAlone = TRUE, sanitize = TRUE)
+p
+```
+
+### Graduation Rate
+
+```{r cs-degree-rates-gender}
+persistence_and_degrees %>% 
+  filter(matriculation_major == "CS") %>%
+  pandy::pandy_summarize(gender)
+```
+
+## Across URM {.tabset}
+
+### Plot
+```{r cs-within-coe-urm}
+persistence_and_degrees %>% 
+  facet_plot(matriculation_major, urm) +
+  scale_fill_manual(values=c("#cf4420", "#4D78B2")) +
+  labs(color = "Computer Science",
+       title = if (params$major_of_interest == "CS") {
+            "URM CS students have one of the highest graduation rates."
+         } else {
+           paste0("URM ", params$major_of_interest, " students in the context of other COE majors")
+         }) -> p
+
+base_name = paste0(params$major_of_interest, "_in_coe_by_urm")
+if (valid_path(params$output)) ggsave(file.path(params$output, paste0(base_name, ".png")), p, 
+                                                width = 6.5, height = 3, units = "in") 
+if(valid_path(params$svg_output))
+  ggsave(file.path(params$svg_output, paste0(base_name, ".svg")), p, 
+         width = params$svg_width, 
+         height = params$svg_height)
+
+if (params$major_of_interest == "CS") 
+  ggsavetikz(p, file.path(params$tikz_output, paste0(base_name, ".tex")), width = params$plot_width, height = params$plot_height, standAlone = TRUE, sanitize = TRUE, verbose = FALSE)
+p
+```
+
+### Graduation Rate
+```{r cs-urm-degree-rates}
+persistence_and_degrees %>% 
+  filter(matriculation_major == "CS") %>%
+  # NOTE: when also filtering by coe_matriculation_term <= graduation_max_term,
+  # graduation rates change to 78% and 80% for non-URM and URM, respectively.
+  # in other words, the URM students who start outside the college
+  pandy::pandy_summarize(urm)
+```
+
+## CS in the COE across First-Generation {.tabset}
+
+### Plot
+```{r cs-within-coe-firstgen}
+persistence_and_degrees %>% 
+  mutate(first_generation = fct_relevel(first_generation, c("Continuing Generation"))) %>%
+  facet_plot(matriculation_major, first_generation) +
+  hokie_scale_fill +
+  labs(color = "Computer Science",
+       title = if (params$major_of_interest == "CS") {
+                "Firstgen CS students have the highest graduation rates."
+         } else {
+           paste0("First-generation ", params$major_of_interest, " students in the context of other COE majors")
+         }) -> p
+
+base_name = paste0(params$major_of_interest, "_in_coe_by_firstgen")
+if (valid_path(params$output)) ggsave(file.path(params$output, paste0(base_name, ".png")), p, width = 6.5, height = 3.25, units = "in") 
+
+if(valid_path(params$svg_output))
+  ggsave(file.path(params$svg_output, paste0(base_name, ".svg")), p, 
+         width = params$svg_width, 
+         height = params$svg_height)
+
+if (params$major_of_interest == "CS") 
+  ggsavetikz(p, file.path(params$tikz_output, paste0(base_name, ".tex")), width = params$plot_width, height = params$plot_height, standAlone = TRUE, sanitize = TRUE)
+p
+```
+
+### CS First-gen Degree Rates
+```{r cs-firstgen-degree-rates}
+persistence_and_degrees %>% 
+  filter(matriculation_major == "CS") %>%
+  pandy::pandy_summarize(first_generation)
+```
+
+# Stickiness
+
+Of the number of people who ever enrolled in a major, how many go on to earn a degree from it?
+
+```{r cs-stickiness}
+semi_join(coe_undergrad_data, coe_undergrad_records %>% filter(major == "CS"), by = "id") %>%
+  left_join(coe_vtir_degrees %>% 
+              filter(major == "CS") %>% 
+              select(id, term_degree, years_to_degree),
+          by = "id") -> ever_in_cs
+
+ever_in_cs %>% 
+  group_by(first_generation, gender) %>% 
+  dplyr::summarize(n = n_distinct(id), 
+                   n_degrees = sum(!is.na(years_to_degree)), 
+                   stickiness = n_degrees / n)
+```
+
+# Compariing Demographics within CS {.tabset}
+
+## Gender {.tabset}
+
+Viewing computer science in relationships to other majors tells us that as a major it has one of the higher graduation rates and a relatively short distance between male and female students compared to other majors. Female students have a higher yield than male student in CS, a pattern shared by CE, AE, CPE, and Other. However, female students have a lower persistence rate (though keep in mind this is 8-semesters of persistence within the college, not major)
+
+In this plot, measures for male and female populations within a major are connected by a line, indicating the gendered relationship between success metrics for each major.
+
+```{r success-across-major-and-gender, warning=FALSE}
+gender_tbl <- persistence_and_degrees %>% 
+  #mutate(matriculation_major = fct_other(!!matriculation_major, keep = params$major_of_interest)) %>%
+  mutate(gender = fct_relevel(gender, "Male")) %>%
+  filter(matriculation_major == params$major_of_interest) %>%
+  pandy::pandy_summarize(matriculation_major, gender, persist_term = 8, strict = FALSE) 
+```
+
+### Plot
+
+```{r gender-plot, warning=FALSE}
+p <- pandy_slope_plot(gender_tbl, matriculation_major, gender, 
+                  title = "Female CS students have lower persistence and yield rates than their male peers.\nThis results in a lower graduation rate compared to male CS students.") 
+
+base_name <- paste0(params$major_of_interest, "_by_gender")
+if (valid_path(params$output)) ggsave(file.path(params$output, paste0(base_name, ".pdf")), p, width = 6, height = 4, units = "in")
+if (params$major_of_interest == "CS") 
+  ggsavetikz(p, file.path(params$tikz_output, paste0(base_name, ".tex")), width = params$plot_width, height = params$plot_height, standAlone = TRUE, sanitize = TRUE)
+p
+```
+
+### Table
+```{r gender-table}
+pretty_table(gender_tbl, matriculation_major)
+```
+
+
+## First Generation Status {.tabset}
+
+CS has similar distance between first-gen and non-first-gen populations to other majors, and first-gen students in CS experience higher persistance and yield rates than their non-first-gen counterparts. CS is not unique in this regard, CHE and ISE also exhibit this pattern though with lower graduation rates, but it does go against the trend across the college that aligns with literature on first-gen students. Numbers are relatively small--n=7 for first-gen student in CS--so it would be interesting to see if this pattern continues when we get data up through Spring 2018.
+
+### Plot
+
+```{r first_generation_plot, warning=FALSE}
+first_generation_tbl <-  persistence_and_degrees %>% 
+  filter(matriculation_major == params$major_of_interest) %>%
+  pandy_summarize(matriculation_major, first_generation, persist_term = 8, strict = FALSE)
+
+p <- first_generation_tbl %>% pandy_slope_plot(matriculation_major, first_generation, 
+             title = "First-Generation CS students persist experience higer persistence and yield rates\n their peers, translating to higher degree rates.") +
+  labs(color = "First Generation")
+
+base_name <- paste0(params$major_of_interest, "_by_firstgen")
+if (valid_path(params$output)) ggsave(file.path(params$output, paste0(base_name, ".pdf")), p, width = 6, height = 4, units = "in")
+if (params$major_of_interest == "CS") 
+  ggsavetikz(p, file.path(params$tikz_output, paste0(base_name, ".tex")), width = params$plot_width, height = params$plot_height, standAlone = TRUE, sanitize = TRUE, verbose = FALSE)
+p
+```
+
+First-Gen CS students higher graduation rate is due to a much higher persistence rate in the COE compared to their peers.
+### Table
+```{r success-across-major-and-firstgen, warning=FALSE}
+pretty_table(first_generation_tbl, matriculation_major) 
+```
+
+
+
+## URM Status {.tabset}
+
+```{r success-across-major-and-urm, warning=FALSE}
+urm_tbl <-  persistence_and_degrees %>% 
+  filter(matriculation_major == params$major_of_interest) %>%
+  pandy_summarize(matriculation_major, urm, persist_term = 8, strict = FALSE)
+```
+
+Underrepresented minority students appear to have quite different pathways to success from their counterparts in CS. CS has one of the greatest separation between these two populations. CS is one of three majors shown in which URM students have a 100% persistence rate (though keep in mind n=7 for this sub-population). CS and AE are the only displayed majors for which URM students have a higher yield than their non-URM counterparts. Also in both of these cases the graduation rate of URM students is higher than their counterparts.
+
+### Plot
+
+```{r urm-plot, warning=FALSE}
+p <- pandy_slope_plot(urm_tbl, matriculation_major, urm, title = "URM CS students have higher graduation rates than non-URM CS students,\n despite lower yield.") +
+  labs(color = "URM")
+
+base_name <- paste0(params$major_of_interest, "_by_urm")
+if (valid_path(params$output)) ggsave(file.path(params$output, paste0(base_name, ".png")), p, width = 6, height = 4, units = "in")
+if (params$major_of_interest == "CS") 
+  ggsavetikz(p, file.path(params$tikz_output, paste0(base_name, ".tex")), width = params$plot_width, height = params$plot_height, standAlone = TRUE, sanitize = TRUE)
+p
+```
+
+### Table
+```{r urm-table}
+pretty_table(urm_tbl, matriculation_major)
+```
+
+# General Observations
+
+It would be more consistent with other analysis if we had a meaningful way to talk about persistence in a major. With the first-year program and the GE designation the most obvious measure would be to use a 6-semester persistence in a particular major. This would eliminate students who start in one major but switch to another and eventually graduate within 6 years as being successful, and some major changes are probably easier than others, for instances, starting in EE in semesters 3 and 4 and then switching to CPE for the remaining time likely wouldn't significantly impact 6-year graduation rate.
+
+The main observation is that there is quite a bit of variance across majors and these differences preclude making any general claims regarding female success across the college. The gray contour lines delineate 40, 50, 60, 70, 80, and 90% 6-year graduation rates. Populations that lie on the same contour line may have different experiences despite having similar graduation rates. For example non-first-gen students in ISE and first-gen students in CE both fall near the 70% 6-year graduation rate contour, but the non-first-gen ISE students linger in engineering longer with less likelihood to graduate in the major whereas those in CE leave engineering earlier, but those who do stay are more likely to receive a CE degree.
+
+# References

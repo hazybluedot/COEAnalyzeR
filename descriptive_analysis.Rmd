@@ -1,0 +1,539 @@
+---
+title: "Descriptive Analysis with Pre-Summarize"
+author: "Darren Maczka"
+date: "April 5, 2018"
+output:
+  html_notebook:
+    toc: true
+    toc_float: true
+    code_folding: hide
+params:
+  major_of_interest: "CS"
+  tikz_output: ~/Documents/manuscript1/figures
+  output: ~/ENGE/Studies/Computing Intent/figures
+  svg_output: ~/ENGE/defense/img
+  svg_width: 7
+  svg_height: 4
+---
+
+```{r setup, echo=FALSE}
+knitr::opts_chunk$set(echo = TRUE, root.dir="~/ENGE/Studies")
+library(tidyverse)
+library(pander)
+library(racadia)
+library(deepr)
+library(xtable)
+library(tikzDevice)
+library(ggplot2)
+
+library(vtir)
+library(vtirdata)
+library(COEanalysis)
+
+max_degree_term <- as_term(max(coe_vtir_degrees$term_degree))
+graduation_window <- graduation_window_fct(max_degree_term)
+
+library(stringr)
+options(xtable.sanitize.text.function = function(x) {
+    str_replace(x, 'Virginia Tech', 'VirginiaTech') %>%
+    str_replace('VirginiaTech', '\\\\VirginiaTech{}') %>%
+    str_replace('VT', '\\\\VT{}') %>%
+    str_replace('%', '\\\\%')
+},
+        xtable.caption.placement = "top",
+        xtable.booktabs = TRUE)
+
+# as_academicYears <- function(year) {
+#   year - 1 + 0.33
+# }
+
+hokie_color_scale <- scale_color_manual(values=c("#630031", "#cf4420"))
+```
+
+```{r sumary-functions, echo=FALSE}
+summary_table <- function(data, ..., group_by = NULL) {
+ group_vars <- quos(...)
+ if (is.null(group_by)) {
+   res <- data %>%
+    mutate_if(is.factor, as.character) %>%
+    gather(variable, value, !!!group_vars) %>%
+    group_by(variable, value) %>%
+    summarise (N = n()) %>%
+    mutate(`%` = 100 * N / sum(N))
+ } else {
+   res <- data %>%
+    mutate_if(is.factor, as.character) %>%
+    gather(variable, value, !!!group_vars) %>%
+    group_by(!!group_by, variable, value) %>%
+    summarise (N = n()) %>%
+    mutate(`%` = 100 * N / sum(N))
+ }
+ 
+ res$variable <- as.character(res$variable)
+ #make 'empty lines' 
+ empties <- as_tibble(data.frame(variable=unique(res$variable), stringsAsFactors=FALSE))
+ empties[,colnames(res)[-1]] <- ""
+ output <- rbind(empties,lapply(res[colnames(res)], as.character))
+ output <- output[order(output$variable,output$value),]
+
+#optional: 'remove' variable if value present
+ output$variable[output$value!=""] <- ""
+ output$`%` <- as.numeric(output$`%`)
+ output
+}
+```
+
+
+# CS within the College
+
+## Degree Data
+
+```{r load-degree-data}
+
+load_advising_data <- function() {
+  load("~/ENGE/data/tidy/enge_advising_data.rda")
+  select(enge_advising_data, id = IDS, 
+         pre_orientation_major = Pre.O.Major.Selection,
+         gender = Gender,
+         urm = URM,
+         first_generation = FirstGeneration,
+         tuition = Tuition,
+         application_term = Application.Term,
+         first_term = FirstTerm,
+         fall_admit = FallAdmit,
+         choice_1 = Choice.1,
+         choice_2 = Choice.2,
+         choice_3 = Choice.3,
+         primary_major = Primary.Major) %>% 
+    distinct()
+}
+
+enge_advising_data <- load_advising_data()
+
+vtir_students %>%
+    filter(gender %in% c("Female", "Male"),
+         first_generation %in% c("N", "Y")) %>% 
+  droplevels() ->
+  vtir_students
+
+#student_median_income <- left_join(precollege, median_income, by = c(ZIPCODE ="ZIP5")) %>%
+#  select(IDS, family)
+
+#student.data <- left_join(student.data, precollege %>% select(IDS, ZIPCODE), by = "IDS")
+validzip <- grep('[0-9]{5}', vtir_students$home_zip)
+vtir_students[-validzip,]$home_zip <- NA
+
+left_join(vtir_degrees, vtir_students, by = "id") %>%
+  filter(complete.cases(id, gender, urm, first_generation, tuition, fall_admissions_term, term_enter)) ->
+  any_degrees
+
+vtir_degrees %>% 
+  filter(category == "Primary Major",
+         degree == "BS",
+         major == params$major_of_interest) %>%
+  left_join(vtir_students %>% select(id, term_enter, gender, urm, first_generation), by = "id") %>%
+  left_join(matriculation_majors(vtir_terms, major), by = "id") ->
+  cs_degrees
+
+cs_degrees %>% 
+  #left_join(vtir_students, by = "id") %>% str()
+  group_by(first_generation) %>%
+  summarize(first_matriculated = sum(first_matriculation_major == "CS", na.rm = TRUE),
+            matriculated_later = sum(first_matriculation_major != "CS", na.rm = TRUE))
+
+cs_degrees %>% 
+  left_join(enge_advising_data[, c("id","pre_orientation_major")], by = "id") %>% filter(!is.na(pre_orientation_major)) %>%
+  #left_join(vtir_students, by = "id") %>%
+  group_by(first_generation) %>%
+  summarize(pre_selected = sum(pre_orientation_major == "CS", na.rm = TRUE),
+            not_pre_selected = sum(pre_orientation_major != "CS", na.rm = TRUE)) 
+  
+```
+
+# Taulbee Data
+
+```{r taulbee-gender data}
+taulbee_data <- data.frame(
+  year = c(rep(2016,2), rep(2017,2)),
+  gender = c(rep(c("Male", "Female"), 2)),
+  enrollment = c(78853, 17704, 89847, 21733), 
+  degrees = c(14259, 3107, 17252, 4036)) %>% as_tibble() %>%
+  mutate(source = "Taulbee")
+
+bind_rows(taulbee_data, 
+          cs_degrees %>% filter(complete.cases(gender)) %>%
+            mutate(year = term_year(term_degree)) %>%
+            group_by(year, gender) %>%
+            summarize(degrees = n_distinct(id)) %>%
+            mutate(source = "VT")) %>%
+  filter(between(year, 2016, 2017)) %>%
+  group_by(source, gender) %>%
+  summarize(degrees = sum(degrees)) -> M
+
+Mtbl <- xtabs(degrees ~ source + gender, M)
+#colnames(M) <- c("Taulbee", "VT")
+
+(Xsq <- chisq.test(Mtbl))
+print(xtable(Mtbl %>% t(), caption = "CS Degrees awarded 2016-2017 by Taulbee institutions and \\VT{}", 
+             label="tab:taulbee_gender_comparison", 
+             digits = 0), file = "~/Documents/manuscript1/tab:taulbee_gender_comparison.tex")
+```
+
+```{r taulbee-urm data}
+taulbee_urm_data <- cbind(urm = c(Male = 221 + 2874 + 168 + 1849 + 5998, Female = 40 + 787 + 34 + 423 + 115),
+                          nonurm = c(Male = 14175 + 31707, Female = 4312 + 4627))
+
+apply(taulbee_urm_data, 2, sum) %>% as.data.frame() -> taulbee_urm_df
+names(taulbee_urm_df) <- c("Value")
+
+vtir_terms %>%
+  filter(major == "CS", between(term_year(term), 2009, 2012), student_level <= 69) %>%
+  distinct(id) %>% left_join(vtir_students, by = "id") %>%
+  filter(!is.na(urm)) %>%
+  group_by(urm) %>%
+  summarize(n = n()) ->
+  cs_2016_enrollment
+
+rbind(taulbee_urm_df %>% mutate(urm = c("Y", "N"), source = "Taulbee") %>%
+        select(urm, n = Value, source),
+      cs_2016_enrollment %>%
+        mutate(source = "VT")) -> urm_numbers
+
+UrmTbl <- xtabs(n ~ urm + source, urm_numbers)
+(Xsq <- chisq.test(UrmTbl))
+```
+
+
+## Advising Data
+
+Our department's advising data contains information about intended major and actual enrolled major, as well as each time a student changed their intended major. Linked with demographic information it provides a good starting point to ask "who" questions, such as "who arrives at Virginia Tech intending to major in Computer Science" and "Who ultimately chooses CS as their first choice of major?"
+
+### Response Rate
+
+```{r pre-orientation-response-rate}
+vtir_students %>%
+  filter(fall_admissions_term >= as_term(200909)) %>%
+  semi_join(vtir_terms %>%
+              filter(college_code == 5 | major == "CEM") %>%
+              select(id, term, college_code, major), by = "id") %>%
+  group_by(term_year = term_year(term_enter)) %>%
+  summarize(admitted = n_distinct(id)) ->
+  enrollment
+
+enge_advising_data %>% 
+  group_by(fall_admit = floor(fall_admit)) %>% 
+  summarize(n = n_distinct(id)) ->
+  surveys
+
+enge_advising_data %>%
+  filter(gender %in% c("Female", "Male"),
+         complete.cases(gender, urm, first_generation),
+         between(floor(fall_admit), 2012, 2016))->
+  college_data
+
+left_join(enrollment, surveys, by = c(term_year = "fall_admit")) %>%
+  mutate(completion = round(100 * n / admitted, 3))
+```
+
+```{r average response rate}
+left_join(enrollment, surveys, by = c(term_year = "fall_admit")) %>%
+  mutate(completion = round(100 * n / admitted, 3)) %>%
+  filter(between(term_year, 2012, 2016)) %>%
+  summarize_at(vars(admitted, n), sum) %>%
+  mutate(completion = 100 * n / admitted)
+```
+
+```{r pre-orientation major intent}
+college_data %>% 
+  group_by(id) %>% 
+  summarize(pre_orientation_major = first(pre_orientation_major)) %>%
+  mutate(N = n(), NnNA = sum(!is.na(pre_orientation_major))) %>% 
+  group_by(pre_orientation_major) %>% 
+  mutate(nMajor = n(), pct = round(100 * nMajor / N, 2), pctnNA = round(100 * nMajor / NnNA, 2)) %>%
+  select(pre_orientation_major, N, NnNA, nMajor, pct, pctnNA) %>%
+  filter(row_number()==1) %>%
+  arrange(-pct)
+```
+
+### Who Arrives Intending to Major in CS?
+
+```{r data-overview}
+panderOptions('digits', 2)
+#panderOptions('round', 2)
+
+college_data %>% 
+  group_by(id) %>%
+  summarize(pre_orientation_choice = firstna(pre_orientation_major),
+            first_choice = first(choice_1, order_by = first_term),
+            last_choice = last(choice_1, order_by = first_term)) ->
+  major_choice
+
+college_data %>% 
+  group_by(id) %>% 
+  #arrange(desc(first_term)) %>% 
+  summarize(application_term = first(application_term), final_first_choice = last(choice_1, order_by = application_term)) ->
+  final_choice 
+
+college_data %>%
+  filter(primary_major == params$major_of_interest) %>%
+  group_by(id) %>%
+  #arrange(application_term) %>%
+  #summarize_all(dplyr::last, order_by = application_term) ->
+  summarize(choice_1 = dplyr::last(choice_1, order_by = application_term)) ->
+  final_choice_cs 
+
+college_data %>%
+  filter(primary_major == params$major_of_interest) %>%
+  group_by(id) %>%
+  #summarize_all(dplyr::first, order_by = application_term) ->
+  summarize(choice_1 = dplyr::first(choice_1, order_by = application_term)) ->
+  first_choice_cs 
+
+college_data %>% 
+  filter(pre_orientation_major == params$major_of_interest) %>%
+  group_by(id) %>%
+  #summarize_all(dplyr::first, order_by = first_term) ->
+  summarize(choice_1 = dplyr::first(choice_1, order_by = first_term)) ->
+  incoming_cs 
+```
+
+
+### Who "Leaves" CS?
+
+Of those who enter saying they indend to major in CS, who changes their mind by the end of the year?
+
+```{r who-leaves}
+left_join(incoming_cs, final_choice, by = "id") %>% 
+  filter(final_first_choice != "CS") ->
+  leaving_cs
+tbl <- summary_table(leaving_cs %>% left_join(college_data, by = "id"), gender, urm, first_generation, tuition)
+#xtabs(~ Gender + URM + FirstGeneration, data = incoming_cs)
+#xtbl <- xtable(tbl, digits = 2)
+#pander(xtbl)
+```
+### Who "Joins" CS?
+
+```{r joining_cs}
+left_join(college_data, final_choice, by = "id") %>% 
+  filter(pre_orientation_major != "CS", final_first_choice == "CS") %>% 
+  group_by(id) %>% 
+  droplevels() %>%
+  #summarize_all(first, order_by = "first_term") ->
+  summarize(choice_1 = first(choice_1, order_by = first_term)) ->
+  joining_cs 
+#tbl <- summary_table(joining_cs, Gender, URM, Ethnicity, FirstGeneration, Tuition)
+#xtabs(~ Gender + URM + FirstGeneration, data = incoming_cs)
+#xtbl <- xtable(tbl, digits = 2)
+#pander(xtbl)
+```
+
+### Who's First Choice is CS at the End of the Year?
+
+This is looking at the distribution of students who select CS as their first choice of major at the end of the year. They may not get their first choice, however.
+
+# Who Graduates with a CS Degree?
+
+# Summary
+
+```{r get college means}
+coe_undergrad_data %>%
+  select(id, gender, urm, first_generation) %>%
+  semi_join(coe_undergrad_records %>%
+              filter(between(term, as_term("Fall 2012"), as_term("Fall 2016")),
+                     major == "GE"), by = "id") %>%
+  mutate(variable = "College", epoch = "Incoming") ->
+  coe_incoming
+
+coe_undergrad_data %>%
+  semi_join(rbind(coe_undergrad_data %>%
+                    semi_join(coe_incoming, by = "id") %>% # incoming cohort
+                    filter(!is.na(matriculation_major)), # who matriculated
+                  coe_undergrad_data %>%
+                    filter(between(term_enter, as_term("Fall 2013"), as_term("Fall 2017")),
+                           !is.na(matriculation_major))), by = "id") %>%
+  select(id, gender, urm, first_generation) %>%
+  mutate(variable = "College",
+         epoch = "Declared") ->
+  coe_declared
+
+coe_undergrad_data %>%
+  semi_join(rbind(coe_vtir_degrees %>%
+                    semi_join(coe_undergrad_data %>%
+                                semi_join(rbind(coe_incoming, coe_declared), by = "id"), by = "id"),
+                  coe_vtir_degrees %>%
+                    filter(term_degree >= as_term("Spring 2014 "))), by = "id") %>%
+  select(id, gender, urm, first_generation) %>%
+  mutate(variable = "College",
+         epoch = "Degree") ->
+  coe_degreed
+```
+
+```{r summary-bars, warning=FALSE, message=FALSE}
+library(scales)
+
+pretty_names <- function(.data, var) {
+  var <- enquo(var)
+  .data %>%
+    mutate(!!var := str_replace(!!var, "gender", "Female"),
+           !!var := str_replace(!!var, "first_generation", "First Generation"),
+           !!var := str_replace(!!var, "urm", "URM"))  
+}
+
+epoch_select <- function(.data, epoch, source = "advising", ...) {
+  select_vars <- quos(...)
+  .data %>% 
+    select(id, gender, urm, first_generation) %>% 
+    mutate(epoch = epoch, source = source)
+}
+
+rbind(coe_incoming,
+      coe_declared,
+      coe_degreed) %>%
+  mutate(source = "vtir") ->
+  college_epoch_data  
+
+epoch_data <- rbind(incoming_cs %>% left_join(college_data, by = "id") %>% epoch_select("Incoming"),
+                    final_choice_cs %>% left_join(college_data, by = "id") %>% epoch_select("Declared"),
+                    cs_degrees %>% filter(term_degree >= as_term("Spring 2014")) %>% epoch_select("Degree", "vtir"))
+
+rbind(college_data %>% group_by(id) %>% filter(row_number() == 1) %>% epoch_select("Incoming"),
+      college_data %>% filter(!is.na(choice_1), is_eng_major(choice_1)) %>% group_by(id) %>% filter(row_number() == 1) %>% epoch_select("Declared")) %>% mutate(variable = "College") ->
+  advising_coe_data
+
+epoch_summarize <- function(.data) {
+  .data %>%
+    gather(variable, value, c(gender, urm, first_generation)) %>%
+    group_by(epoch, variable) %>%
+    mutate(total = n_distinct(id)) %>%
+    unite(variable, c(variable, value)) %>%
+    filter(grepl("(_Female|_Y)$", variable)) %>%
+    mutate(variable = str_replace(variable, "gender_Female", "Female"),
+           variable = str_replace(variable, "(.*)_Y", "\\1") %>%
+             str_replace("urm", "URM") %>%
+             str_replace("first_generation", "First-Generation")) %>%
+    group_by(epoch, variable) %>%
+    mutate(n = n_distinct(id)) %>% filter(row_number() == 1) %>%
+    select(-id)
+}
+
+college_epoch_data %>%
+  mutate(urm = if_else(urm == "URM", "Y", "N"),
+         first_generation = if_else(first_generation == "First-Generation", "Y", "N")) %>%
+  epoch_summarize ->
+  coe_epoch_summary
+
+bind_rows(advising_coe_data %>% epoch_summarize, 
+          coe_epoch_summary %>% filter(epoch == "Degree")) ->
+  fye_epoch_summary
+
+epoch_data %>%
+ epoch_summarize ->
+ cs_epoch_summary
+
+rbind(fye_epoch_summary %>% mutate(program = "COE"),
+      cs_epoch_summary %>% mutate(program = "CS")) ->
+  epoch_summary
+
+epoch_summary %>%
+  write_csv("~/ENGE/defense/data/epoch_data.csv")
+
+epoch_summary %>% 
+  mutate(n = paste(n, paste0("(", round(100 * n / total, 2), "%)"))) %>% 
+  select(-total, -source) %>% 
+  spread(epoch, n) ->
+  tbl_data
+
+#names(slope_data)[-c(1,2)] <- c("College", "Incoming", "Declared", "Degree")
+names(tbl_data) <- sapply(names(tbl_data), sanitizeTexString)
+xtbl <- xtable(tbl_data %>% ungroup() %>% pretty_names(variable) %>% select(variable, program, Incoming, Declared, Degree), digits = 2, 
+               label = "tab:cs_composition",
+               caption = "Representation of female, URM, and first-generation students in Computer Science compared with the College of Engineering.")
+print(xtbl, include.rownames = FALSE, file = "~/Documents/manuscript1/tab:cs_composition.tex")
+pander(xtbl)
+# TODO clean up for publication
+```
+
+```{r get cs matricualtion from vtir data}
+coe_undergrad_data %>%
+  #graduation_window(term_enter) %>%
+  filter(term_enter >= as_term("Fall 2013"), matriculation_major == "CS") %>%
+  select(id, gender, urm, first_generation) %>%
+  mutate(variable = "CS",
+         epoch = "Declared") ->
+  vtir_cs_declared
+
+vtir_cs_declared %>%
+  mutate(urm = if_else(urm == "URM", "Y", "N"),
+         first_generation = if_else(first_generation == "First-Generation", "Y", "N")) %>%
+  epoch_summarize %>%
+  mutate(pct = round( 100 * n / total, 2))
+```
+
+```{r cs_composition-plot}
+  title = "Representation in CS over time, compared to the college.\nFemale and URM representation in CS remains below the college average\nfrom incoming through degrees. Firstgen representation starts below\nthe college average but picks up students once they declare their majors."
+
+# rbind(epoch_summary %>% filter(epoch == "College") %>% mutate(x = -Inf),
+#       epoch_summary %>% filter(epoch == "College")%>% mutate(x = Inf)) %>%
+#   mutate(avg = 100 * n / total) ->
+#   college_avg
+
+epoch_summary %>% 
+  ungroup() %>% 
+  #filter(epoch != "College") %>%
+  mutate(epoch = fct_relevel(epoch, c("Incoming", "Declared", "Degree"))) %>%
+  pretty_names(variable) %>%
+  ggplot(aes(epoch, y = 100 * n / total, color = program)) + 
+  geom_point() + 
+  geom_text(aes(label = paste0("(",round(100 * n / total,1), "%)")),
+            data = function(d) d %>% filter(epoch == "Incoming"),
+            nudge_x = -.2, nudge_y = 0) +
+  geom_text(aes(label = paste0("(",round(100 * n / total,1), "%)")),
+            data = function(d) d %>% filter(epoch == "Degree", program == "CS"),
+            nudge_x = .2, nudge_y = 0) +
+  hokie_color_scale +
+  geom_line(aes(group = program)) +
+  #geom_line(aes(x, avg), college_avg %>% pretty_names(variable)) +
+  #geom_text(aes(y = with(college_avg, avg) + 2, x = .71, label = epoch), college_avg %>% ungroup() %>% mutate(epoch = paste0("COE mean = ", round(avg), "%")) %>%
+  #            pretty_names(variable)) +
+  facet_grid(rows = vars(variable)) +
+  labs(y = "% (N) underrepresented",
+       x = "Time Epochs",
+       title = "Underrepresented population of CS compared to the College of Engineering") ->
+  p
+
+base_name <- paste0(params$major_of_interest, "_composition_epochs")
+# ggsave(file.path(params$output, paste0(base_name, ".png")), p, 
+#                                       width = 6, height = 4, units = "in")
+
+# ggsave(file.path(params$svg_output, paste0(base_name, ".svg")), p,
+#        width = params$svg_width, height = params$svg_height)
+
+if (TRUE) {
+  ggsavetikz(p, file.path(params$tikz_output, 'cs_composition_epochs.tex'), standAlone = TRUE, sanitize = TRUE, pdf = TRUE, verbose = FALSE)
+}
+
+#geom_line(aes(x , y = College, linetype = value), college_avg) +
+p
+```
+I have included 'Frequent', representing the `FrequentMajor` variable in the courses dataset to confirm that it is a reasonable indicator of "official" major. 
+
+```{r waterfall}
+make_waterfall <- function() {
+  start = 0
+}
+waterfall_data <- rbind(incoming_cs %>%
+                          mutate(desc = "Incoming", type = "net"),
+                        joining_cs %>% 
+                          mutate(desc = "Join", type = "in"),
+                        leaving_cs %>% 
+                          select(id, choice_1) %>%
+                          mutate(desc = "Leave", type = "out"),
+                        final_choice_cs %>%
+                          mutate(desc = "Declare", type = "net")) %>%
+  left_join(vtir_students, by = "id") %>%
+  group_by(desc, gender) %>%
+  summarize(N = n())
+
+waterfall_data <- transform(waterfall_data,
+                            desc = parse_factor(desc, c("Incoming", "Join", "Leave", "Declare")))
+```
